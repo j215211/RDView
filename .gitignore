@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+.idea/
+.vscode/
+coverage/
+
+# Prisma
+apps/api/prisma/*.db
+apps/api/prisma/migrations/dev/
+
+# 用户上传的素材 (俯瞰图/3D 模型)
+data/
+uploads/
+
+# License 文件 (不入库)
+license.lic
+keys/private.pem

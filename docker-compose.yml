@@ -1,0 +1,82 @@
+version: "3.8"
+
+# RDView 局域网部署
+# 在客户机房一台机器上一键启动: docker compose up -d
+# 默认端口:
+#   - 80    Web 大屏 (Nginx 静态 + 反向代理 /api)
+#   - 3000  API (NestJS,容器内)
+#   - 1935  ZLMediaKit RTMP 推流
+#   - 554   ZLMediaKit RTSP
+#   - 8080  ZLMediaKit HTTP (HTTP-FLV / HLS)
+#   - 8000  ZLMediaKit WebRTC HTTP API
+
+services:
+  # ===== 数据库 =====
+  postgres:
+    image: postgres:16-alpine
+    container_name: rdview-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rdview
+      POSTGRES_PASSWORD: rdview_pwd_change_me
+      POSTGRES_DB: rdview
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - rdview
+
+  # ===== 流媒体网关 (RTSP → HTTP-FLV / WebRTC) =====
+  zlm:
+    image: zlmediakit/zlmediakit:master
+    container_name: rdview-zlm
+    restart: unless-stopped
+    # host 网络模式: 局域网 ONVIF 探测和 RTSP 拉流体验最好
+    network_mode: host
+    volumes:
+      - ./docker/zlm/config.ini:/opt/media/conf/config.ini:ro
+      - ./data/zlm:/opt/media/bin/www
+
+  # ===== 业务后端 API =====
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: rdview-api
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://rdview:rdview_pwd_change_me@postgres:5432/rdview?schema=public
+      JWT_SECRET: change_me_in_production_please
+      ZLM_HOST: host.docker.internal
+      ZLM_HTTP_PORT: 8080
+      ZLM_SECRET: rdview_zlm_secret
+      UPLOAD_DIR: /app/uploads
+      NODE_ENV: production
+    volumes:
+      - ./data/uploads:/app/uploads
+      - ./license.lic:/app/license.lic:ro
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - rdview
+
+  # ===== Web 前端 =====
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: rdview-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+    networks:
+      - rdview
+
+networks:
+  rdview:
+    driver: bridge

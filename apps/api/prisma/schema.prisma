@@ -1,0 +1,235 @@
+// RDView 数据模型
+// 设计原则:
+// 1. Map (场景) + Point (点位) + Camera (摄像头设备) 三层解耦
+//    一个 Map 可以是 2D 俯瞰图,也可以是 3D 模型
+//    一个 Point 绑定一个 Camera (或者临时不绑定)
+//    一个 Camera 可以在多个 Map 上有点位 (比如总览图 + 楼层图)
+// 2. 点位坐标归一化 (0~1),换图也能用 — 2D 用 (x,y),3D 用 (x,y,z)
+// 3. NVR 作为可选实体: 一个 NVR 下挂多个 Camera
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===================== 账号体系 =====================
+
+enum Role {
+  ADMIN       // 管理员 — 全部权限
+  OPERATOR    // 操作员 — 查看 + PTZ
+  VIEWER      // 观察员 — 仅查看
+}
+
+model User {
+  id          Int       @id @default(autoincrement())
+  username    String    @unique
+  password    String    // bcrypt
+  realName    String?   @map("real_name")
+  phone       String?
+  role        Role      @default(VIEWER)
+  enabled     Boolean   @default(true)
+  lastLoginAt DateTime? @map("last_login_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  operations  OperationLog[]
+
+  @@map("users")
+}
+
+// ===================== 设备与拓扑 =====================
+
+// NVR 录像机 (可选,小项目可以不录入,直接录 Camera)
+model Nvr {
+  id        Int       @id @default(autoincrement())
+  name      String
+  host      String    // IP
+  port      Int       @default(80)
+  username  String
+  password  String    // 加密存储
+  vendor    String?   // hikvision / dahua / uniview / ...
+  model     String?
+  channels  Int       @default(0)
+  online    Boolean   @default(false)
+  lastSeenAt DateTime? @map("last_seen_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  cameras   Camera[]
+
+  @@map("nvrs")
+}
+
+// 摄像头 — 物理设备 + 接入信息
+model Camera {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique // 业务编号 CAM-01
+  name        String                                 // 显示名 园区西门
+  vendor      String?   // 厂商
+  model       String?
+  channelNo   Int?      @map("channel_no")           // NVR 下挂时的通道号
+  nvrId       Int?      @map("nvr_id")
+  nvr         Nvr?      @relation(fields: [nvrId], references: [id], onDelete: SetNull)
+
+  // 接入参数
+  rtspMain    String?   @map("rtsp_main")            // 主码流 rtsp://...
+  rtspSub     String?   @map("rtsp_sub")             // 子码流 (低分辨率,用于多分屏)
+  onvifHost   String?   @map("onvif_host")           // ONVIF 设备 IP
+  onvifPort   Int?      @map("onvif_port")
+  onvifUser   String?   @map("onvif_user")
+  onvifPass   String?   @map("onvif_pass")           // 加密存储
+
+  // 能力位 (扫描得到)
+  hasPtz      Boolean   @default(false) @map("has_ptz")
+  hasAudio    Boolean   @default(false) @map("has_audio")
+  resolution  String?   // 1920x1080
+
+  // 运行状态
+  online      Boolean   @default(false)
+  lastSeenAt  DateTime? @map("last_seen_at")
+  snapshotUrl String?   @map("snapshot_url")         // 最近截图本地路径
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  points      Point[]
+  alarms      Alarm[]
+
+  @@map("cameras")
+}
+
+// ===================== 场景与点位 =====================
+
+enum MapType {
+  IMAGE_2D    // 俯瞰图 (jpg/png/svg)
+  MODEL_3D    // 3D 模型 (.glb/.gltf)
+}
+
+model Map {
+  id          Int      @id @default(autoincrement())
+  name        String                                  // 总览图 / 一楼平面 / 主控厂房 3D
+  type        MapType  @default(IMAGE_2D)
+  filePath    String   @map("file_path")              // 上传后的相对路径
+  thumbnail   String?                                 // 缩略图路径
+  width       Int?                                    // 原图宽 (2D)
+  height      Int?                                    // 原图高 (2D)
+  sortOrder   Int      @default(0) @map("sort_order")
+  parentId    Int?     @map("parent_id")              // 支持多级 (园区 > 楼栋 > 楼层)
+  parent      Map?     @relation("MapTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Map[]    @relation("MapTree")
+
+  // 3D 模型专用 — 默认相机视角 (JSON)
+  // { pos:[x,y,z], target:[x,y,z], up:[x,y,z] }
+  defaultView Json?    @map("default_view")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  points      Point[]
+
+  @@map("maps")
+}
+
+// 点位 — Camera 在 Map 上的位置标识
+model Point {
+  id        Int      @id @default(autoincrement())
+  mapId     Int      @map("map_id")
+  map       Map      @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  cameraId  Int?     @map("camera_id")                // 允许临时不绑定
+  camera    Camera?  @relation(fields: [cameraId], references: [id], onDelete: SetNull)
+
+  // 归一化坐标 0~1 (2D 只用 x,y;3D 用 x,y,z,基于模型 bounding box)
+  x         Float
+  y         Float
+  z         Float?
+
+  // 朝向 (度) — 2D 决定视野扇形方向;3D 决定相机朝向
+  rotation  Float    @default(0)
+  fov       Float    @default(60)                     // 视野角度
+
+  // 显示样式
+  label     String?                                   // 自定义标签覆盖 camera.name
+  iconColor String?  @map("icon_color")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([mapId, cameraId])
+  @@map("points")
+}
+
+// ===================== 告警 =====================
+
+enum AlarmLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+enum AlarmType {
+  OFFLINE         // 离线
+  SIGNAL_LOST     // 视频信号丢失
+  COVER           // 遮挡
+  MOTION          // 移动侦测
+  INTRUSION       // 越界入侵
+  AI_PERSON       // AI 人形
+  AI_VEHICLE      // AI 车辆
+  CUSTOM
+}
+
+model Alarm {
+  id        Int        @id @default(autoincrement())
+  cameraId  Int        @map("camera_id")
+  camera    Camera     @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  level     AlarmLevel @default(WARN)
+  type      AlarmType
+  message   String
+  payload   Json?      // 原始数据 (AI 检测框/截图路径等)
+  ack       Boolean    @default(false)                // 是否已确认
+  ackBy     Int?       @map("ack_by")
+  ackAt     DateTime?  @map("ack_at")
+  createdAt DateTime   @default(now()) @map("created_at")
+
+  @@index([cameraId, createdAt])
+  @@index([ack, createdAt])
+  @@map("alarms")
+}
+
+// ===================== License =====================
+
+model License {
+  id           Int      @id @default(autoincrement())
+  customer     String                                 // 客户名称
+  machineHash  String   @map("machine_hash")          // 机器指纹哈希
+  maxCameras   Int      @map("max_cameras")
+  maxUsers     Int      @default(10) @map("max_users")
+  features     Json     // ["nvr","ai","playback",...]
+  expireAt     DateTime @map("expire_at")
+  signature    String   @db.Text                       // RSA 签名
+  issuedAt     DateTime @default(now()) @map("issued_at")
+  active       Boolean  @default(true)
+
+  @@map("licenses")
+}
+
+// ===================== 审计日志 =====================
+
+model OperationLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?     @map("user_id")
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String                                    // login / camera.create / ptz.move ...
+  targetType String? @map("target_type")
+  targetId   Int?    @map("target_id")
+  ip        String?
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("operation_logs")
+}

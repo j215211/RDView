@@ -1,0 +1,5 @@
+html, body, #app { height: 100%; margin: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif; background: #0e1421; color: #cbd5e1; }
+.page { padding: 16px; }
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.flex-1 { flex: 1; }
